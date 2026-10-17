@@ -1,0 +1,5 @@
+{
+  "name": "Nettoyage WAV – notch adaptatif",
+  "description": "Supprime les oscillations parasites avec suivi temporel, garde-fous et spectrogrammes avant/après.",
+  "entry": "app.py"
+}

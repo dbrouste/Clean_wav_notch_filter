@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.idea/
+.vscode/
+*.wav
+*_clean_*.csv
+*_clean_*.json
+*_clean_*.png
+*.log
