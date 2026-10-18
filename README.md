@@ -38,3 +38,11 @@ Voir [INSTALL_GITHUB.md](INSTALL_GITHUB.md). Le bouton de mise à jour est dans 
 
 
 Dépôt officiel : https://github.com/dbrouste/Clean_wav_notch_filter
+
+## Optimisation 0.3.0
+
+- La STFT de suivi est calculée une seule fois par taille FFT et partagée entre les oscillations suivies.
+- Le filtre spectral est appliqué uniquement autour de chaque raie parasite, sans allouer un grand masque dense pour chaque canal.
+- La méthode de détection, les garde-fous et les paramètres de l’algorithme restent inchangés.
+- Tests de non-régression sur deux WAV mono 384 kHz / 5 s : différence maximale de sortie inférieure à 3e-14 entre V2 et V3, mêmes notchs activés.
+- Temps mesurés sur environnement de test (moteur uniquement) : 1.86 -> 1.49 s, puis 1.89 -> 0.69 s. Mesures indicatives.
