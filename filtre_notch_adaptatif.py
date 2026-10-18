@@ -524,6 +524,7 @@ def _track_peak_stft(
     hop,
     max_search_hz=900,
     min_tracking_snr_db=8,
+    stft_data=None,
 ):
     """
     Suit une raie autour de f0 dans le temps.
@@ -535,18 +536,15 @@ def _track_peak_stft(
     neighbor_dist = np.min([abs(f0 - f) for f in all_f0 if f != f0] or [2 * max_search_hz])
     search_hz = min(max_search_hz, max(150, 0.42 * neighbor_dist))
 
-    f, t, Z = sig.stft(
-        x,
-        fs=sr,
-        window="hann",
-        nperseg=n_fft,
-        noverlap=n_fft - hop,
-        nfft=n_fft,
-        boundary=None,
-        padded=False,
-    )
-
-    S = np.abs(Z)
+    if stft_data is None:
+        f, t, Z = sig.stft(
+            x, fs=sr, window="hann", nperseg=n_fft,
+            noverlap=n_fft - hop, nfft=n_fft,
+            boundary=None, padded=False,
+        )
+        S = np.abs(Z)
+    else:
+        f, t, S = stft_data
 
     band = (f >= f0 - search_hz) & (f <= f0 + search_hz)
     if np.sum(band) < 3:
@@ -598,6 +596,13 @@ def _track_peak_stft(
         "hop": hop,
     }
 
+
+def _tracking_spectrogram(mono, sr, n_fft, hop):
+    f, t, Z = sig.stft(
+        mono, fs=sr, window="hann", nperseg=n_fft,
+        noverlap=n_fft-hop, nfft=n_fft, boundary=None, padded=False,
+    )
+    return f, t, np.abs(Z)
 
 def _robust_dfdt(track):
     """
@@ -801,6 +806,7 @@ def clean_wav_adaptive_notch(
     n_fft0 = _next_pow2(int(sr * 0.12))
     hop0 = n_fft0 // 4
 
+    stft0 = _tracking_spectrogram(mono, sr, n_fft0, hop0)
     tracks0 = [
         _track_peak_stft(
             mono,
@@ -810,6 +816,7 @@ def clean_wav_adaptive_notch(
             n_fft=n_fft0,
             hop=hop0,
             min_tracking_snr_db=min_tracking_snr_db,
+            stft_data=stft0,
         )
         for f0 in peak_freqs
     ]
@@ -820,6 +827,7 @@ def clean_wav_adaptive_notch(
     n_fft, hop, chosen_T = _choose_analysis_fft(sr, dfdt_p95)
 
     # 4) Suivi final avec FFT adaptée
+    stft_final = _tracking_spectrogram(mono, sr, n_fft, hop) if (n_fft, hop) != (n_fft0, hop0) else stft0
     tracks = [
         _track_peak_stft(
             mono,
@@ -829,6 +837,7 @@ def clean_wav_adaptive_notch(
             n_fft=n_fft,
             hop=hop,
             min_tracking_snr_db=min_tracking_snr_db,
+            stft_data=stft_final,
         )
         for f0 in peak_freqs
     ]
@@ -903,7 +912,8 @@ def clean_wav_adaptive_notch(
             padded=True,
         )
 
-        total_mask = np.ones_like(np.abs(Z), dtype=np.float64)
+        # Apply local notch directly to complex STFT; avoids an additional
+        # full-size float64 mask for every channel.
 
 
         for tr, do_apply in zip(tracks, apply_flags):
@@ -949,7 +959,13 @@ def clean_wav_adaptive_notch(
                     previous_attenuation_db = None
                     continue
 
-                d = np.abs(f - fc[j])
+                # Super-Gaussian is numerically negligible beyond 2.5 half-widths.
+                # Restrict work to the relevant bins instead of the entire spectrum.
+                low = max(0, np.searchsorted(f, fc[j] - 2.5 * half_width))
+                high = min(len(f), np.searchsorted(f, fc[j] + 2.5 * half_width, side="right"))
+                if low == high:
+                    continue
+                d = np.abs(f[low:high] - fc[j])
                 notch_shape = np.exp(-0.5 * (d / half_width) ** (2 * notch_order))
 
                 depth_j, attenuation_db_j, noise_ref_j, peak_ref_j = _estimate_adaptive_notch_depth_over_time(
@@ -970,9 +986,9 @@ def clean_wav_adaptive_notch(
                 previous_attenuation_db = attenuation_db_j
 
                 frame_mask = 1.0 - depth_j * notch_shape
-                total_mask[:, j] *= frame_mask
+                Z[low:high, j] *= frame_mask
 
-        Z_clean = Z * total_mask
+        Z_clean = Z
 
         _, yc = sig.istft(
             Z_clean,
