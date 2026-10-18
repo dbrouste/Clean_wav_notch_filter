@@ -1,5 +1,5 @@
 [project]
 name = "wav-oscillation-adaptive"
-version = "0.2.0"
+version = "0.3.0"
 requires-python = ">=3.11"
 dependencies = ["nicegui>=3.0", "pywebview>=5.0", "numpy>=1.26", "scipy>=1.13", "soundfile>=0.12", "pandas>=2.0", "matplotlib>=3.8"]
