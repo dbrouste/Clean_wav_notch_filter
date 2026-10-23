@@ -521,16 +521,43 @@ def _estimate_global_peaks(
     if len(peaks) == 0:
         raise RuntimeError("Aucune oscillation persistante nette détectée.")
 
-    # La proéminence discrimine mieux une raie étroite qu'un simple niveau
-    # absolu, notamment dans les bandes où le bruit de fond varie fortement.
-    prominences = props["prominences"]
-    order = np.argsort(prominences)[::-1]
-    peaks = peaks[order[:n_peaks]]
+    # Vérification de persistance avec *contraste local par trame*.
+    # Une médiane temporelle peut encore créer un faux pic vers 35 kHz
+    # si des chirps intermittents couvrent la bande sur de nombreuses trames.
+    # Une oscillation continue doit rester étroite ET visible par rapport aux
+    # fréquences adjacentes dans la grande majorité des trames.
+    frame_db = 20 * np.log10(np.abs(Z) + 1e-30)
+    df = f[1] - f[0]
+    inner = max(4, int(np.ceil(400.0 / df)))
+    outer = max(inner + 8, int(np.ceil(1200.0 / df)))
+    center_radius = max(1, int(np.ceil(18.0 / df)))
+    minimum_contrast_db = 8.0
+    minimum_persistence = 0.70
 
+    accepted = []
+    for index, peak in enumerate(peaks):
+        k = np.where(mask)[0][peak]
+        left = frame_db[max(0, k - outer):max(0, k - inner), :]
+        right = frame_db[min(len(f), k + inner + 1):min(len(f), k + outer + 1), :]
+        if left.size == 0 or right.size == 0:
+            continue
+        local = frame_db[max(0, k - center_radius):min(len(f), k + center_radius + 1), :]
+        background = np.median(np.concatenate((left, right), axis=0), axis=0)
+        excess = np.max(local, axis=0) - background
+        persistence = float(np.mean(excess >= minimum_contrast_db))
+        if persistence >= minimum_persistence:
+            accepted.append((peak, props["prominences"][index]))
+
+    if not accepted:
+        raise RuntimeError(
+            "Aucune raie suffisamment étroite et persistante détectée. "
+            "Aucun notch appliqué pour protéger le signal utile."
+        )
+
+    accepted.sort(key=lambda item: item[1], reverse=True)
+    peaks = np.array([item[0] for item in accepted[:n_peaks]], dtype=int)
     peak_freqs = ff[peaks]
     peak_levels = yy[peaks]
-
-    # Tri final par proéminence décroissante, conservé dans l'ordre précédent.
     return peak_freqs, peak_levels, f, persistent_db
 
 def _track_peak_stft(
