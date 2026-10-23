@@ -46,3 +46,39 @@ Dépôt officiel : https://github.com/dbrouste/Clean_wav_notch_filter
 - La méthode de détection, les garde-fous et les paramètres de l’algorithme restent inchangés.
 - Tests de non-régression sur deux WAV mono 384 kHz / 5 s : différence maximale de sortie inférieure à 3e-14 entre V2 et V3, mêmes notchs activés.
 - Temps mesurés sur environnement de test (moteur uniquement) : 1.86 -> 1.49 s, puis 1.89 -> 0.69 s. Mesures indicatives.
+
+
+## V4 : plafonnement spectral (mode recommandé, expérimental)
+
+La V4 conserve la **détection et validation de persistance de la V3** (avec dérive
+fréquentielle), mais utilise une suppression plus douce des raies sélectionnées.
+Pour chaque trame STFT, elle estime le bruit voisin de la raie suivie et
+**plafonne le module des coefficients spectraux** dans un rayon réglable autour
+de cette raie. Les fréquences dont le niveau est déjà inférieur à la cible
+ne sont pas diminuées. La V3 *Notch super-gaussien* reste sélectionnable dans
+l'interface pour comparer.
+
+- Mode par défaut : `Plafonnement spectral`.
+- Niveau cible par défaut : **0 dB par rapport au bruit adjacent**.
+- Rayon par défaut : **±180 Hz** autour de chaque raie.
+- Résolution STFT de traitement : 32768 échantillons (pas ~11,7 Hz à 384 kHz).
+- Les réglages « facteur de correction » et « lissage temporel » restent
+  propres au mode super-gaussien.
+
+**Validation exploratoire :** sur les deux fichiers `rec_20260117_185315.wav`
+et `rec_20260117_185326.wav`, avec six raies sélectionnées manuellement pour
+isoler la méthode de nettoyage, la plage de contraste médian des raies est
+passée d'environ +11…+45 dB à +2,6…+3,9 dB par rapport au bruit voisin.
+Le changement d'énergie dans la bande utile 30–40 kHz est inférieur à 0,001 dB.
+Ces chiffres sont des résultats **du module de traitement isolé**, et non
+une validation exhaustive de la chaîne entière de détection V3 + nettoyage V4.
+Un test synthétique (oscillation à 50,88 kHz dérivant de ±40 Hz, plus chirp à
+30–40 kHz) vérifie une réduction de plus de 20 dB de l'oscillation et un
+changement d'énergie des chirps inférieur à 0,05 dB.
+
+Tests unitaires : `python -m unittest discover -s tests -v`.
+
+**Précaution :** une raie proche d'un signal utile à la même fréquence est
+physiquement impossible à retirer sans risque de perdre une partie de ce signal.
+Vérifier les spectrogrammes de sortie et préférer le mode historique ou réduire
+le rayon de correction en cas de doute.

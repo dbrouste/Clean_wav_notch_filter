@@ -1,4 +1,5 @@
 from pathlib import Path
+from spectral_floor import spectral_floor_clean_stft
 import numpy as np
 import pandas as pd
 import soundfile as sf
@@ -843,6 +844,9 @@ def clean_wav_adaptive_notch(
     attenuation_smoothing_alpha=0.85,
     residual_passes=2,
     notch_order=2,
+    cleaning_mode="spectral_floor",
+    spectral_floor_target_db=0.0,
+    spectral_floor_radius_hz=180.0,
     verbose=True,
 ):
     """
@@ -978,6 +982,16 @@ def clean_wav_adaptive_notch(
 
     # 6) Nettoyage canal par canal en STFT
 
+    if cleaning_mode not in ("spectral_floor", "super_gaussian"):
+        raise ValueError(f"Mode de filtrage inconnu : {cleaning_mode}")
+    if spectral_floor_radius_hz <= 0:
+        raise ValueError("Rayon du filtrage spectral invalide.")
+
+    # La résolution de 11,7 Hz à 384 kHz a été testée sur les deux WAV.
+    # Utiliser un maillage STFT stable pour le nouveau mode.
+    processing_nfft = 32768 if cleaning_mode == "spectral_floor" else n_fft
+    processing_hop = processing_nfft // 4
+
     y = np.zeros_like(x)
 
     for ch in range(x.shape[1]):
@@ -989,9 +1003,9 @@ def clean_wav_adaptive_notch(
             xc0,
             fs=sr,
             window="hann",
-            nperseg=n_fft,
-            noverlap=n_fft - hop,
-            nfft=n_fft,
+            nperseg=processing_nfft,
+            noverlap=processing_nfft - processing_hop,
+            nfft=processing_nfft,
             boundary="zeros",
             padded=True,
         )
@@ -1000,91 +1014,98 @@ def clean_wav_adaptive_notch(
         # full-size float64 mask for every channel.
 
 
-        for tr, do_apply in zip(tracks, apply_flags):
-            if not do_apply:
-                continue
-
-            fc = np.interp(t, tr["t"], tr["freq"])
-            valid = np.interp(t, tr["t"], tr["valid"].astype(float)) > 0.5
-
-            # Largeur dépendante de la mesure :
-            # - largeur minimale
-            # - largeur liée au range p05-p95
-            # - largeur liée au drift pendant une fenêtre FFT
-            tr_report = report.loc[np.isclose(report["f0_global_hz"], tr["f0"])].iloc[0]
-
-            measured_width = tr_report["range_p05_p95_hz"]
-            drift_width = tr_report["dfdt_p95_abs_hz_s"] * chosen_T
-
-            # Sécurité si une valeur est NaN
-            if not np.isfinite(measured_width):
-                measured_width = 0.0
-            if not np.isfinite(drift_width):
-                drift_width = 0.0
-
-            width_hz = max(
-                min_notch_width_hz,
-                measured_width + notch_margin_hz,
-                2.0 * drift_width + notch_margin_hz,
-                2.0 * (sr / n_fft),
+        if cleaning_mode == "spectral_floor":
+            spectral_floor_clean_stft(
+                Z, f, t, tracks, apply_flags,
+                target_margin_db=spectral_floor_target_db,
+                radius_hz=spectral_floor_radius_hz,
             )
-
-            width_hz = float(np.clip(width_hz, min_notch_width_hz, max_notch_width_hz))
-
-            # Super-Gaussian notch.
-            # width_hz correspond approximativement à la largeur utile du creux.
-            half_width = width_hz / 2.0
-            half_width = max(half_width, 1.0)
-
-            previous_attenuation_db = None
-
-            for j in range(Z.shape[1]):
-                if not valid[j]:
-                    previous_attenuation_db = None
+        else:
+            for tr, do_apply in zip(tracks, apply_flags):
+                if not do_apply:
                     continue
 
-                # Super-Gaussian is numerically negligible beyond 2.5 half-widths.
-                # Restrict work to the relevant bins instead of the entire spectrum.
-                low = max(0, np.searchsorted(f, fc[j] - 2.5 * half_width))
-                high = min(len(f), np.searchsorted(f, fc[j] + 2.5 * half_width, side="right"))
-                if low == high:
-                    continue
-                d = np.abs(f[low:high] - fc[j])
-                notch_shape = np.exp(-0.5 * (d / half_width) ** (2 * notch_order))
+                fc = np.interp(t, tr["t"], tr["freq"])
+                valid = np.interp(t, tr["t"], tr["valid"].astype(float)) > 0.5
 
-                # Premier passage : correction adaptative lissée dans le temps.
-                # Passages suivants : on remesure le résidu après correction et on
-                # retire uniquement ce qui dépasse encore la cible. Cela compense
-                # les résidus laissés par la forme super-gaussienne et par un fort
-                # niveau de raie sans élargir artificiellement le notch.
-                first_attenuation_db = 0.0
-                for residual_pass in range(max(1, int(residual_passes))):
-                    depth_j, attenuation_db_j, noise_ref_j, peak_ref_j = _estimate_adaptive_notch_depth_over_time(
-                        f=f,
-                        spectrum_mag=np.abs(Z[:, j]),
-                        fc=fc[j],
-                        notch_width_hz=width_hz,
-                        target_margin_db=target_margin_db,
-                        correction_factor=notch_correction_factor,
-                        adjacent_inner_margin_hz=adjacent_inner_margin_hz,
-                        adjacent_outer_margin_hz=adjacent_outer_margin_hz,
-                        min_excess_db=min_excess_db,
-                        max_attenuation_db=max_attenuation_db,
-                        smoothing_alpha=attenuation_smoothing_alpha if residual_pass == 0 else None,
-                        previous_attenuation_db=previous_attenuation_db if residual_pass == 0 else None,
-                    )
+                # Largeur dépendante de la mesure :
+                # - largeur minimale
+                # - largeur liée au range p05-p95
+                # - largeur liée au drift pendant une fenêtre FFT
+                tr_report = report.loc[np.isclose(report["f0_global_hz"], tr["f0"])].iloc[0]
 
-                    if residual_pass == 0:
-                        first_attenuation_db = attenuation_db_j
+                measured_width = tr_report["range_p05_p95_hz"]
+                drift_width = tr_report["dfdt_p95_abs_hz_s"] * chosen_T
 
-                    # Plus rien à corriger : évite un second calcul/masque inutile.
-                    if attenuation_db_j <= 0.0:
-                        break
+                # Sécurité si une valeur est NaN
+                if not np.isfinite(measured_width):
+                    measured_width = 0.0
+                if not np.isfinite(drift_width):
+                    drift_width = 0.0
 
-                    frame_mask = 1.0 - depth_j * notch_shape
-                    Z[low:high, j] *= frame_mask
+                width_hz = max(
+                    min_notch_width_hz,
+                    measured_width + notch_margin_hz,
+                    2.0 * drift_width + notch_margin_hz,
+                    2.0 * (sr / n_fft),
+                )
 
-                previous_attenuation_db = first_attenuation_db
+                width_hz = float(np.clip(width_hz, min_notch_width_hz, max_notch_width_hz))
+
+                # Super-Gaussian notch.
+                # width_hz correspond approximativement à la largeur utile du creux.
+                half_width = width_hz / 2.0
+                half_width = max(half_width, 1.0)
+
+                previous_attenuation_db = None
+
+                for j in range(Z.shape[1]):
+                    if not valid[j]:
+                        previous_attenuation_db = None
+                        continue
+
+                    # Super-Gaussian is numerically negligible beyond 2.5 half-widths.
+                    # Restrict work to the relevant bins instead of the entire spectrum.
+                    low = max(0, np.searchsorted(f, fc[j] - 2.5 * half_width))
+                    high = min(len(f), np.searchsorted(f, fc[j] + 2.5 * half_width, side="right"))
+                    if low == high:
+                        continue
+                    d = np.abs(f[low:high] - fc[j])
+                    notch_shape = np.exp(-0.5 * (d / half_width) ** (2 * notch_order))
+
+                    # Premier passage : correction adaptative lissée dans le temps.
+                    # Passages suivants : on remesure le résidu après correction et on
+                    # retire uniquement ce qui dépasse encore la cible. Cela compense
+                    # les résidus laissés par la forme super-gaussienne et par un fort
+                    # niveau de raie sans élargir artificiellement le notch.
+                    first_attenuation_db = 0.0
+                    for residual_pass in range(max(1, int(residual_passes))):
+                        depth_j, attenuation_db_j, noise_ref_j, peak_ref_j = _estimate_adaptive_notch_depth_over_time(
+                            f=f,
+                            spectrum_mag=np.abs(Z[:, j]),
+                            fc=fc[j],
+                            notch_width_hz=width_hz,
+                            target_margin_db=target_margin_db,
+                            correction_factor=notch_correction_factor,
+                            adjacent_inner_margin_hz=adjacent_inner_margin_hz,
+                            adjacent_outer_margin_hz=adjacent_outer_margin_hz,
+                            min_excess_db=min_excess_db,
+                            max_attenuation_db=max_attenuation_db,
+                            smoothing_alpha=attenuation_smoothing_alpha if residual_pass == 0 else None,
+                            previous_attenuation_db=previous_attenuation_db if residual_pass == 0 else None,
+                        )
+
+                        if residual_pass == 0:
+                            first_attenuation_db = attenuation_db_j
+
+                        # Plus rien à corriger : évite un second calcul/masque inutile.
+                        if attenuation_db_j <= 0.0:
+                            break
+
+                        frame_mask = 1.0 - depth_j * notch_shape
+                        Z[low:high, j] *= frame_mask
+
+                    previous_attenuation_db = first_attenuation_db
 
         Z_clean = Z
 
@@ -1092,9 +1113,9 @@ def clean_wav_adaptive_notch(
             Z_clean,
             fs=sr,
             window="hann",
-            nperseg=n_fft,
-            noverlap=n_fft - hop,
-            nfft=n_fft,
+            nperseg=processing_nfft,
+            noverlap=processing_nfft - processing_hop,
+            nfft=processing_nfft,
             input_onesided=True,
             boundary=True,
         )
