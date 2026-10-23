@@ -54,6 +54,12 @@ with ui.column().classes('w-full max-w-5xl mx-auto p-6 gap-4'):
                 fmax=ui.number('Fréquence max. (Hz, 0 = automatique)', value=0, min=0)
             with ui.row().classes('gap-3 items-end'):
                 correction=ui.number('Facteur de correction', value=1.0, min=0, max=2, step=0.05, format='%.2f').tooltip('1 = correction calculée ; 0.75 = plus douce ; >1 = plus forte').classes('w-48')
+            with ui.row().classes('gap-3 items-end'):
+                filter_method=ui.select(
+                    {'spectral_floor':'V4 · Plafonnement spectral (recommandé)',
+                     'super_gaussian':'V3 · Notch super-gaussien (historique)'},
+                    value='spectral_floor',label='Méthode de nettoyage'
+                ).classes('w-96')
             status=ui.label('Prêt.')
             results=ui.column().classes('w-full gap-2')
         with ui.tab_panel(reglages):
@@ -81,12 +87,15 @@ with ui.column().classes('w-full max-w-5xl mx-auto p-6 gap-4'):
                 adjacent_inner=ui.number('Bruit adjacent : marge interne (Hz)',value=1000,min=0)
                 adjacent_outer=ui.number('Bruit adjacent : marge externe (Hz)',value=3000,min=0)
                 smoothing=ui.number('Lissage temporel (0–1)',value=0.85,min=0,max=1,step=0.05)
+            with ui.row().classes('gap-3'):
+                floor_target=ui.number('V4 : cible au-dessus du bruit (dB)',value=0.0,min=-3,max=6,step=0.5).tooltip('0 dB recommandé : profondeur modérée, meilleure préservation du bruit de fond')
+                floor_radius=ui.number('V4 : rayon maximal (Hz)',value=180,min=30,max=600,step=10).tooltip('Bande filtrée autour de chaque raie suivie : ± ce rayon')
                 residual_passes=ui.number('Passages résiduels',value=2,min=1,max=3,precision=0).tooltip('2 = remesure et corrige une seconde fois uniquement la raie résiduelle')
         with ui.tab_panel(aide):
             ui.markdown('''### Fonctionnement
 **Paramètres principaux** : « Oscillations recherchées » est le nombre maximum de raies persistantes à détecter ; « Facteur de correction » règle la force de l'atténuation (1,0 par défaut). La détection utilise désormais la persistance temporelle afin de moins confondre les chirps transitoires avec des raies parasites. Ces réglages se trouvent dans l'onglet Traitement.\n\nLe script détecte les raies parasites globales, suit leur fréquence par STFT, teste leur présence et leur stabilité puis applique les masques notch temps-fréquence **canal par canal**. Il conserve l’original, produit un WAV nettoyé, un rapport CSV et une image des spectrogrammes.
 
-**Garde-fous** : un pic absent ou trop instable peut être signalé sans être filtré. Vérifie les spectrogrammes, particulièrement en présence de cris de chauves-souris proches des fréquences parasites.
+**Modes de nettoyage** : V4 plafonne l'amplitude dans une bande étroite autour de chaque raie validée au niveau du bruit spectral adjacent, pour éviter les creux profonds. La V3 reste accessible pour comparaison. Le facteur de correction et le lissage temporel concernent la V3. Les paramètres V4 sont dans les réglages avancés.\n\n**Garde-fous** : un pic absent ou trop instable peut être signalé sans être filtré. Vérifie les spectrogrammes, particulièrement en présence de cris de chauves-souris proches des fréquences parasites.
 
 **Mode Répertoire** : sélectionner un dossier ou saisir son chemin. Tous les WAV du dossier (non récursif) sont traités avec les mêmes réglages. Les résultats sont créés dans `nettoyes`, sans écraser les fichiers existants. Les erreurs sur un fichier n’interrompent pas les suivants.\n\n**Fichiers produits** : `*_clean.wav`, `*_clean_report.csv`, éventuellement `*_clean_correlation.csv`, `*_clean_summary.json`, `*_clean_spectrogrammes.png`.
 
@@ -158,7 +167,8 @@ with ui.column().classes('w-full max-w-5xl mx-auto p-6 gap-4'):
             min_excess_db=float(min_excess.value),target_margin_db=float(target_margin.value),
             notch_correction_factor=float(correction.value),adjacent_inner_margin_hz=float(adjacent_inner.value),
             adjacent_outer_margin_hz=float(adjacent_outer.value),attenuation_smoothing_alpha=float(smoothing.value),
-            residual_passes=int(residual_passes.value))
+            residual_passes=int(residual_passes.value),cleaning_mode=filter_method.value,
+            spectral_floor_target_db=float(floor_target.value),spectral_floor_radius_hz=float(floor_radius.value))
 
     def show_single(ret):
         with results:
