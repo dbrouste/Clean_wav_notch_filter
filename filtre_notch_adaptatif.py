@@ -600,6 +600,15 @@ def _track_peak_stft(
     amps = np.asarray(amps)
     snr_db = np.asarray(snr_db)
 
+    # Un maximum local faible peut sauter d'un bin à l'autre et faire croire à
+    # une dérive très rapide. Un petit filtre médian temporel supprime ces
+    # sauts isolés sans lisser une vraie dérive lente de l'oscillation.
+    if len(freqs) >= 5:
+        raw_freqs = freqs.copy()
+        freqs = sig.medfilt(freqs, kernel_size=5)
+        freqs[:2] = raw_freqs[:2]
+        freqs[-2:] = raw_freqs[-2:]
+
     valid = snr_db >= min_tracking_snr_db
 
     return {
