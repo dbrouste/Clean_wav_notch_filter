@@ -467,30 +467,47 @@ def _estimate_global_peaks(
     prominence_db=6,
 ):
     """
-    Détecte les raies dominantes sur une PSD globale.
+    Détecte les raies *persistantes* plutôt que les événements transitoires.
+
+    L'ancienne version classait les pics sur une PSD de Welch moyenne. Un cri
+    bref mais puissant pouvait alors passer devant une oscillation parasite
+    faible mais présente pendant tout le fichier.
+
+    Ici on calcule une STFT puis le spectre médian dans le temps. Une raie
+    continue reste forte dans ce spectre, alors qu'un chirp transitoire est
+    fortement pénalisé. Les candidats sont ensuite classés par proéminence.
     """
     if fmax is None:
         fmax = sr / 2 - 1_000
 
     x = x - np.mean(x)
 
-    nperseg = min(len(x), _next_pow2(int(sr * 0.8)))
+    # Environ 120 ms : résolution suffisante pour les raies fines tout en
+    # gardant assez de trames temporelles sur les fichiers courts.
+    nperseg = min(len(x), _next_pow2(int(sr * 0.12)))
     nperseg = max(4096, nperseg)
+    hop = max(1, nperseg // 4)
 
-    f, pxx = sig.welch(
+    f, _, Z = sig.stft(
         x,
         fs=sr,
         window="hann",
         nperseg=nperseg,
-        noverlap=nperseg // 2,
-        scaling="spectrum",
+        noverlap=nperseg - hop,
+        nfft=nperseg,
+        boundary=None,
+        padded=False,
     )
 
-    psd_db = 10 * np.log10(pxx + 1e-30)
+    # Médiane temporelle = score de persistance.
+    persistent_db = np.median(20 * np.log10(np.abs(Z) + 1e-30), axis=1)
 
     mask = (f >= fmin) & (f <= fmax)
     ff = f[mask]
-    yy = psd_db[mask]
+    yy = persistent_db[mask]
+
+    if len(ff) < 3:
+        raise RuntimeError("Bande de détection trop étroite.")
 
     df = ff[1] - ff[0]
     min_dist_bins = max(1, int(min_peak_distance_hz / df))
@@ -502,18 +519,19 @@ def _estimate_global_peaks(
     )
 
     if len(peaks) == 0:
-        raise RuntimeError("Aucune oscillation nette détectée.")
+        raise RuntimeError("Aucune oscillation persistante nette détectée.")
 
-    order = np.argsort(yy[peaks])[::-1]
+    # La proéminence discrimine mieux une raie étroite qu'un simple niveau
+    # absolu, notamment dans les bandes où le bruit de fond varie fortement.
+    prominences = props["prominences"]
+    order = np.argsort(prominences)[::-1]
     peaks = peaks[order[:n_peaks]]
 
     peak_freqs = ff[peaks]
     peak_levels = yy[peaks]
 
-    # Tri par amplitude décroissante
-    idx = np.argsort(peak_levels)[::-1]
-    return peak_freqs[idx], peak_levels[idx], f, psd_db
-
+    # Tri final par proéminence décroissante, conservé dans l'ordre précédent.
+    return peak_freqs, peak_levels, f, persistent_db
 
 def _track_peak_stft(
     x,
@@ -581,6 +599,15 @@ def _track_peak_stft(
     freqs = np.asarray(freqs)
     amps = np.asarray(amps)
     snr_db = np.asarray(snr_db)
+
+    # Un maximum local faible peut sauter d'un bin à l'autre et faire croire à
+    # une dérive très rapide. Un petit filtre médian temporel supprime ces
+    # sauts isolés sans lisser une vraie dérive lente de l'oscillation.
+    if len(freqs) >= 5:
+        raw_freqs = freqs.copy()
+        freqs = sig.medfilt(freqs, kernel_size=5)
+        freqs[:2] = raw_freqs[:2]
+        freqs[-2:] = raw_freqs[-2:]
 
     valid = snr_db >= min_tracking_snr_db
 
@@ -754,10 +781,11 @@ def clean_wav_adaptive_notch(
     max_attenuation_db=45,
     min_excess_db=3,
     target_margin_db=2.0,
-    notch_correction_factor=0.75,
+    notch_correction_factor=1.0,
     adjacent_inner_margin_hz=80,
     adjacent_outer_margin_hz=800,
     attenuation_smoothing_alpha=0.85,
+    residual_passes=2,
     notch_order=2,
     verbose=True,
 ):
@@ -968,25 +996,39 @@ def clean_wav_adaptive_notch(
                 d = np.abs(f[low:high] - fc[j])
                 notch_shape = np.exp(-0.5 * (d / half_width) ** (2 * notch_order))
 
-                depth_j, attenuation_db_j, noise_ref_j, peak_ref_j = _estimate_adaptive_notch_depth_over_time(
-                    f=f,
-                    spectrum_mag=np.abs(Z[:, j]),
-                    fc=fc[j],
-                    notch_width_hz=width_hz,
-                    target_margin_db=target_margin_db,
-                    correction_factor=notch_correction_factor,
-                    adjacent_inner_margin_hz=adjacent_inner_margin_hz,
-                    adjacent_outer_margin_hz=adjacent_outer_margin_hz,
-                    min_excess_db=min_excess_db,
-                    max_attenuation_db=max_attenuation_db,
-                    smoothing_alpha=attenuation_smoothing_alpha,
-                    previous_attenuation_db=previous_attenuation_db,
-                )
+                # Premier passage : correction adaptative lissée dans le temps.
+                # Passages suivants : on remesure le résidu après correction et on
+                # retire uniquement ce qui dépasse encore la cible. Cela compense
+                # les résidus laissés par la forme super-gaussienne et par un fort
+                # niveau de raie sans élargir artificiellement le notch.
+                first_attenuation_db = 0.0
+                for residual_pass in range(max(1, int(residual_passes))):
+                    depth_j, attenuation_db_j, noise_ref_j, peak_ref_j = _estimate_adaptive_notch_depth_over_time(
+                        f=f,
+                        spectrum_mag=np.abs(Z[:, j]),
+                        fc=fc[j],
+                        notch_width_hz=width_hz,
+                        target_margin_db=target_margin_db,
+                        correction_factor=notch_correction_factor,
+                        adjacent_inner_margin_hz=adjacent_inner_margin_hz,
+                        adjacent_outer_margin_hz=adjacent_outer_margin_hz,
+                        min_excess_db=min_excess_db,
+                        max_attenuation_db=max_attenuation_db,
+                        smoothing_alpha=attenuation_smoothing_alpha if residual_pass == 0 else None,
+                        previous_attenuation_db=previous_attenuation_db if residual_pass == 0 else None,
+                    )
 
-                previous_attenuation_db = attenuation_db_j
+                    if residual_pass == 0:
+                        first_attenuation_db = attenuation_db_j
 
-                frame_mask = 1.0 - depth_j * notch_shape
-                Z[low:high, j] *= frame_mask
+                    # Plus rien à corriger : évite un second calcul/masque inutile.
+                    if attenuation_db_j <= 0.0:
+                        break
+
+                    frame_mask = 1.0 - depth_j * notch_shape
+                    Z[low:high, j] *= frame_mask
+
+                previous_attenuation_db = first_attenuation_db
 
         Z_clean = Z
 

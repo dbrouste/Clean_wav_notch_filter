@@ -49,11 +49,11 @@ with ui.column().classes('w-full max-w-5xl mx-auto p-6 gap-4'):
                 folder_fields.set_visibility(e.value == 'folder')
             mode.on_value_change(switch_mode)
             with ui.row().classes('gap-3'):
-                n=ui.number('Oscillations recherchées', value=5, min=1, max=20, precision=0)
+                n=ui.number('Oscillations recherchées', value=10, min=1, max=20, precision=0)
                 fmin=ui.number('Fréquence min. (Hz)', value=1000, min=0)
                 fmax=ui.number('Fréquence max. (Hz, 0 = automatique)', value=0, min=0)
             with ui.row().classes('gap-3 items-end'):
-                correction=ui.number('Facteur de correction', value=0.75, min=0, max=2, step=0.05, format='%.2f').tooltip('1 = correction calculée ; 0.75 = plus douce ; >1 = plus forte').classes('w-48')
+                correction=ui.number('Facteur de correction', value=1.0, min=0, max=2, step=0.05, format='%.2f').tooltip('1 = correction calculée ; 0.75 = plus douce ; >1 = plus forte').classes('w-48')
             status=ui.label('Prêt.')
             results=ui.column().classes('w-full gap-2')
         with ui.tab_panel(reglages):
@@ -81,9 +81,10 @@ with ui.column().classes('w-full max-w-5xl mx-auto p-6 gap-4'):
                 adjacent_inner=ui.number('Bruit adjacent : marge interne (Hz)',value=1000,min=0)
                 adjacent_outer=ui.number('Bruit adjacent : marge externe (Hz)',value=3000,min=0)
                 smoothing=ui.number('Lissage temporel (0–1)',value=0.85,min=0,max=1,step=0.05)
+                residual_passes=ui.number('Passages résiduels',value=2,min=1,max=3,precision=0).tooltip('2 = remesure et corrige une seconde fois uniquement la raie résiduelle')
         with ui.tab_panel(aide):
             ui.markdown('''### Fonctionnement
-**Paramètres principaux** : « Oscillations recherchées » est le nombre maximum de raies à détecter ; « Facteur de correction » règle la force de l'atténuation (0,75 par défaut, 1,0 normal, 1,2 plus fort). Ces réglages se trouvent dans l'onglet Traitement.\n\nLe script détecte les raies parasites globales, suit leur fréquence par STFT, teste leur présence et leur stabilité puis applique les masques notch temps-fréquence **canal par canal**. Il conserve l’original, produit un WAV nettoyé, un rapport CSV et une image des spectrogrammes.
+**Paramètres principaux** : « Oscillations recherchées » est le nombre maximum de raies persistantes à détecter ; « Facteur de correction » règle la force de l'atténuation (1,0 par défaut). La détection utilise désormais la persistance temporelle afin de moins confondre les chirps transitoires avec des raies parasites. Ces réglages se trouvent dans l'onglet Traitement.\n\nLe script détecte les raies parasites globales, suit leur fréquence par STFT, teste leur présence et leur stabilité puis applique les masques notch temps-fréquence **canal par canal**. Il conserve l’original, produit un WAV nettoyé, un rapport CSV et une image des spectrogrammes.
 
 **Garde-fous** : un pic absent ou trop instable peut être signalé sans être filtré. Vérifie les spectrogrammes, particulièrement en présence de cris de chauves-souris proches des fréquences parasites.
 
@@ -156,7 +157,8 @@ with ui.column().classes('w-full max-w-5xl mx-auto p-6 gap-4'):
             notch_margin_hz=float(margin.value), max_attenuation_db=float(attenuation.value),
             min_excess_db=float(min_excess.value),target_margin_db=float(target_margin.value),
             notch_correction_factor=float(correction.value),adjacent_inner_margin_hz=float(adjacent_inner.value),
-            adjacent_outer_margin_hz=float(adjacent_outer.value),attenuation_smoothing_alpha=float(smoothing.value))
+            adjacent_outer_margin_hz=float(adjacent_outer.value),attenuation_smoothing_alpha=float(smoothing.value),
+            residual_passes=int(residual_passes.value))
 
     def show_single(ret):
         with results:
