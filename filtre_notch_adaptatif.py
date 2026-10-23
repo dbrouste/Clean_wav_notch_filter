@@ -521,37 +521,66 @@ def _estimate_global_peaks(
     if len(peaks) == 0:
         raise RuntimeError("Aucune oscillation persistante nette détectée.")
 
-    # Vérification de persistance avec *contraste local par trame*.
-    # Une médiane temporelle peut encore créer un faux pic vers 35 kHz
-    # si des chirps intermittents couvrent la bande sur de nombreuses trames.
-    # Une oscillation continue doit rester étroite ET visible par rapport aux
-    # fréquences adjacentes dans la grande majorité des trames.
+    # Mesurer la persistance le long d'une trajectoire fréquentielle, pas
+    # autour d'un bin fixe. La dérive lente est acceptée, mais un chirp
+    # transitoire ne doit pas pouvoir entraîner la trajectoire.
     frame_db = 20 * np.log10(np.abs(Z) + 1e-30)
     df = f[1] - f[0]
-    inner = max(4, int(np.ceil(400.0 / df)))
-    outer = max(inner + 8, int(np.ceil(1200.0 / df)))
-    center_radius = max(1, int(np.ceil(18.0 / df)))
-    minimum_contrast_db = 8.0
-    minimum_persistence = 0.70
-
+    max_drift_hz = 500.0
+    max_step_hz = 100.0
+    contrast_threshold_db = 8.0
+    min_persistence = 0.70
     accepted = []
+
     for index, peak in enumerate(peaks):
-        k = np.where(mask)[0][peak]
-        left = frame_db[max(0, k - outer):max(0, k - inner), :]
-        right = frame_db[min(len(f), k + inner + 1):min(len(f), k + outer + 1), :]
-        if left.size == 0 or right.size == 0:
-            continue
-        local = frame_db[max(0, k - center_radius):min(len(f), k + center_radius + 1), :]
-        background = np.median(np.concatenate((left, right), axis=0), axis=0)
-        excess = np.max(local, axis=0) - background
-        persistence = float(np.mean(excess >= minimum_contrast_db))
-        if persistence >= minimum_persistence:
+        k0 = np.where(mask)[0][peak]
+        n_frames = frame_db.shape[1]
+        trajectory = np.full(n_frames, k0, dtype=int)
+        # Démarrer au milieu et progresser dans les deux directions :
+        # évite de dépendre d'une détection faible dans la première trame.
+        mid = n_frames // 2
+        for indices in (range(mid + 1, n_frames), range(mid - 1, -1, -1)):
+            prev = k0
+            for j in indices:
+                lo = max(1, k0 - int(np.ceil(max_drift_hz / df)),
+                         prev - int(np.ceil(max_step_hz / df)))
+                hi = min(len(f) - 1, k0 + int(np.ceil(max_drift_hz / df)) + 1,
+                         prev + int(np.ceil(max_step_hz / df)) + 1)
+                if hi <= lo:
+                    trajectory[j] = prev
+                    continue
+                candidate = lo + int(np.argmax(frame_db[lo:hi, j]))
+                trajectory[j] = candidate
+                prev = candidate
+
+        contrast = np.zeros(n_frames, dtype=float)
+        for j, k in enumerate(trajectory):
+            inner = max(4, int(np.ceil(400.0 / df)))
+            outer = max(inner + 8, int(np.ceil(1200.0 / df)))
+            center_radius = max(1, int(np.ceil(18.0 / df)))
+            left = frame_db[max(0, k - outer):max(0, k - inner), j]
+            right = frame_db[min(len(f), k + inner + 1):min(len(f), k + outer + 1), j]
+            if left.size == 0 or right.size == 0:
+                continue
+            local = frame_db[max(0, k - center_radius):min(len(f), k + center_radius + 1), j]
+            background = np.median(np.concatenate((left, right)))
+            contrast[j] = np.max(local) - background
+
+        persistence = float(np.mean(contrast >= contrast_threshold_db))
+        # Exiger une présence dans chaque partie du fichier afin qu'une
+        # activité vocale concentrée ne passe pas pour une raie continue.
+        segment_ratios = [
+            float(np.mean(chunk >= contrast_threshold_db))
+            for chunk in np.array_split(contrast, min(10, n_frames))
+            if len(chunk)
+        ]
+        if persistence >= min_persistence and min(segment_ratios) >= 0.40:
             accepted.append((peak, props["prominences"][index]))
 
     if not accepted:
         raise RuntimeError(
-            "Aucune raie suffisamment étroite et persistante détectée. "
-            "Aucun notch appliqué pour protéger le signal utile."
+            "Aucune raie étroite persistante (avec dérive lente) détectée. "
+            "Aucun notch appliqué pour préserver le signal utile."
         )
 
     accepted.sort(key=lambda item: item[1], reverse=True)
